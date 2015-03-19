@@ -11,27 +11,31 @@ type Prefixed = Writer [Py.Statement ()]
 main :: IO ()
 main = do
     str <- readFile "example.purs"
-    case runIndentParser "example.purs" parseModule str of
-        Left err -> print err
-        Right m  -> do
-            print m
-            putStrLn ""
-            putStrLn (prettyText (purescriptToPython m))
+    case Ps.lex "example.purs" str of
+        Left  err    -> print err
+        Right tokens -> case runTokenParser "example.purs" parseModule tokens of
+            Left err -> print err
+            Right m  -> do
+                print m
+                putStrLn ""
+                putStrLn (prettyText (purescriptToPython m))
 
+{-
 options :: Options
 options = defaultOptions
     { optionsNoPrelude = True
     , optionsBrowserNamespace = Just "PS"
     }
+-}
 
 purescriptToPython :: Ps.Module -> Py.Module ()
-purescriptToPython (Ps.Module _ decls _) =
+purescriptToPython (Ps.Module _ _ decls _) =
     Py.Module (concatMap psDeclarationToPyStatements decls)
 
 psDeclarationToPyStatements :: Ps.Declaration -> [Py.Statement ()]
 psDeclarationToPyStatements d = case d of
-    PositionedDeclaration _ d'   -> psDeclarationToPyStatements d'
-    ValueDeclaration i Value [] Nothing e -> case i of
+    PositionedDeclaration _ _ d'          -> psDeclarationToPyStatements d'
+    ValueDeclaration i Value [] (Right e) -> case i of
         Ps.Ident name ->
             let (e', statements) = runWriter (psExprToPyExpr e)
             in      statements
@@ -39,43 +43,41 @@ psDeclarationToPyStatements d = case d of
         Op    _    -> error ("Operations unsupported: " ++ show d)
     _ -> error ("Unsupported declaration: " ++ show d)
 
+-- TODO: Go through unimplemented Python expressions and see if there is a
+-- PureScript equivalent
 psExprToPyExpr :: Ps.Expr -> Prefixed (Py.Expr ())
 psExprToPyExpr e = case e of
-    Ps.NumericLiteral x                     -> do
+    Ps.NumericLiteral x                        -> do
         return (case x of
             Left  i -> Py.Int   i (show i) ()
             Right d -> Py.Float d (show d) () )
-    Ps.StringLiteral  str                   -> do
+    Ps.StringLiteral  str                      -> do
         return (Py.Strings [str] ())
-    Ps.BooleanLiteral b                     -> do
+    Ps.BooleanLiteral b                        -> do
         return (Py.Bool b ())
-    Ps.UnaryMinus e1                        -> do
+    Ps.UnaryMinus e1                           -> do
         e1' <- psExprToPyExpr e1
         return (Py.UnaryOp (Minus ()) e1' ())
-    Ps.BinaryNoParens (Qualified m i) e1 e2 -> do
-        case m of
-            Nothing -> do
-                e1' <- psExprToPyExpr e1
-                e2' <- psExprToPyExpr e2
-                return (Py.BinaryOp (psIdentToPyOperation i) e1' e2' ())
-            _       -> do
-                error ("Unsupported qualifier: " ++ show e)
-    Ps.Parens e'                            -> do
+--  Ps.BinaryNoParens i e1 e2                  -> do
+--      e1' <- psExprToPyExpr e1
+--      e2' <- psExprToPyExpr e2
+--      return (Py.BinaryOp (psIdentToPyOperation i) e1' e2' ())
+    Ps.Parens e'                               -> do
         psExprToPyExpr e'
-    Ps.ArrayLiteral es                      -> do
+    Ps.ArrayLiteral es                         -> do
         es' <- mapM psExprToPyExpr es
         return (Py.List es' ())
-    Ps.ObjectLiteral xys                    -> do
+    Ps.ObjectLiteral xys                       -> do
         xys' <- mapM transform xys
         return (Py.Dictionary xys' ())
       where
         transform (x, y) = do
             y' <- psExprToPyExpr y
-            return (Py.Var (Py.Ident x ()) (), y')
-    Ps.Accessor str e1                      -> do
+            return (DictMappingPair (Py.Var (Py.Ident x ()) ()) y')
+    Ps.Accessor str e1                         -> do
         e1' <- psExprToPyExpr e1
-        return (Py.BinaryOp (Dot ()) e1' (Py.Var (Py.Ident str ()) ()) ())
-    Ps.ObjectUpdate e1 xys                  -> do
+        return (Py.Dot e1' (Py.Ident str ()) ())
+    Ps.ObjectUpdate e1 xys                     -> do
         xys' <- mapM transform xys
         e1'  <- psExprToPyExpr e1
         let update =
@@ -85,10 +87,9 @@ psExprToPyExpr e = case e of
                     Nothing
                     (   [Py.Assign
                             [Py.Var (Py.Ident "y" ()) ()]
-                            (Py.BinaryOp
-                                (Py.Dot ())
+                            (Py.Dot
                                 (Py.Var (Py.Ident "x" ()) ())
-                                (Py.Var (Py.Ident "copy" ()) ())
+                                (Py.Ident "copy" ())
                                 () )
                             () ]
                     ++  xys'
@@ -107,7 +108,7 @@ psExprToPyExpr e = case e of
                     () ]
                 y'
                 () )
-    Ps.Abs x e1                             -> do
+    Ps.Abs x e1                                -> do
         e1' <- psExprToPyExpr e1
         case x of
             Left (Ps.Ident str) ->
@@ -115,19 +116,29 @@ psExprToPyExpr e = case e of
                     [Py.Param (Py.Ident str ()) Nothing Nothing ()]
                     e1'
                     () )
-    Ps.App e1 e2                            -> do
+    Ps.App e1 e2                               -> do
         e1' <- psExprToPyExpr e1
         e2' <- psExprToPyExpr e2
         return (Py.Call e1' [Py.ArgExpr e2' ()] ())
-    Ps.PositionedValue _ e1                 -> do
+    Ps.PositionedValue _ _ e1                  -> do
         psExprToPyExpr e1
-    Ps.Var (Qualified x i)                -> do
+    Ps.Var (Ps.Qualified x i)                  -> do
         case x of
             Nothing -> case i of
                 Ps.Ident str -> return (Py.Var (Py.Ident str ()) ())
                 Ps.Op    str -> error ("Unsupported operator name: " ++ show e)
             _       -> error ("Unsupported qualified variable name: " ++ show e)
-    _                                       -> do
+    Ps.IfThenElse e1 e2 e3                     -> do
+        e1' <- psExprToPyExpr e1
+        e2' <- psExprToPyExpr e2
+        e3' <- psExprToPyExpr e3
+        return (CondExpr e1' e2' e3' ())
+    Ps.Constructor (Ps.Qualified m x)          -> do
+        case m of
+            Nothing -> return (Py.Var (Py.Ident (runProperName x) ()) ())
+            _       -> error ("Unsupported qualified constructor name: " ++ show e)
+--  Ps.Case es alts                            -> do
+    _                                          -> do
         error ("Unsupported expression: " ++ show e)
 
 -- TODO: Go through unimplemented Python operators and see if there are official
