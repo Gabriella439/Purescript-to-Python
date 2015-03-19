@@ -20,14 +20,6 @@ main = do
                 putStrLn ""
                 putStrLn (prettyText (purescriptToPython m))
 
-{-
-options :: Options
-options = defaultOptions
-    { optionsNoPrelude = True
-    , optionsBrowserNamespace = Just "PS"
-    }
--}
-
 purescriptToPython :: Ps.Module -> Py.Module ()
 purescriptToPython (Ps.Module _ _ decls _) =
     Py.Module (concatMap psDeclarationToPyStatements decls)
